@@ -10,10 +10,9 @@ FIELD_MAP = [
     ("เนื้อที่", "land_area"),
     ("มีชื่อ", "owner_name"),
     ("ประเภททรัพย์", "asset_type"),
-    ("เลขที่", "asset_number"),
+    ("เลขที่", "unit_number"),
     ("ศาล", "court"),
     ("คดีหมายเลขแดงที่", "case_number"),
-    ("(สำนักงานบังคับคดี", "office"),
     ("เงื่อนไขผู้เข้าสู้ราคา", "deposit_amount"),
     ("จะทำการขายโดย", "sale_condition"),
     ("ราคาประเมินของผู้เชี่ยวชาญ", "appraisal_expert"),
@@ -84,7 +83,7 @@ def parse_detail(html):
         if not label or not value:
             continue
 
-        # Auction date row: "นัดที่ N   วันที่" with \xa0, single round
+        # Auction date rows
         if (
             label.startswith(DATE_LABEL)
             and "\xa0" in label
@@ -93,7 +92,6 @@ def parse_detail(html):
             m = re.search(r"นัดที่\s*(\d+)", label)
             if m:
                 round_num = int(m.group(1))
-                # Status is in next sibling td
                 next_td = td.find_next_sibling("td")
                 status = next_td.get_text(strip=True) if next_td else ""
                 auction_dates[round_num] = {"date": value, "status": status}
@@ -122,6 +120,45 @@ def parse_detail(html):
                     key = "plaintiff" if text == "โจทก์" else "defendant"
                     result[key] = red.get_text(strip=True)
 
+    # office and phone — in same td, split by โทร
+    for td in soup.find_all("td"):
+        text = td.get_text(" ", strip=True)
+        if "(สำนักงานบังคับคดี" in text or "สำนักงานบังคับคดีจังหวัด" in text:
+            reds = td.find_all("font", color="#FF0000")
+            if len(reds) >= 1:
+                result["office"] = reds[0].get_text(strip=True)
+            if len(reds) >= 2:
+                result["phone"] = reds[1].get_text(strip=True)
+            break
+
+    # venue — สถานที่จำหน่าย, text after <strong> tag
+    for td in soup.find_all("td"):
+        strong = td.find("strong")
+        if strong and "สถานที่จำหน่าย" in strong.get_text():
+            # get all text after the strong tag
+            parts = []
+            for node in td.children:
+                if node == strong:
+                    continue
+                if hasattr(node, "get_text"):
+                    parts.append(node.get_text(" ", strip=True))
+                else:
+                    parts.append(str(node).strip())
+            venue = " ".join(p for p in parts if p).strip()
+            if venue:
+                result["venue"] = venue
+            break
+
+    # case_officer — เจ้าของสำนวน
+    for td in soup.find_all("td"):
+        text = td.get_text(" ", strip=True)
+        if "เจ้าของสำนวน" in text:
+            red = td.find("font", color="#FF0000")
+            if red:
+                result["case_officer"] = red.get_text(strip=True)
+            break
+
+    # map FIELD_MAP
     for thai_label, eng_key in FIELD_MAP:
         for raw_label, value in raw.items():
             if thai_label in raw_label:
@@ -142,25 +179,20 @@ def parse_detail(html):
         for k in sorted(auction_dates)
     ]
 
-    images = [
-        img["src"]
-        for img in soup.find_all("img")
-        if "/PPKPicture/" in img.get("src", "")
-    ]
-    for tag in soup.find_all(onclick=True):
-        onclick = tag["onclick"]
-        match = re.search(r"'/PPKPicture/[^']*'", onclick)
-        if match:
-            path = match.group(0).strip("'")
-            if path not in images:
-                images.append(path)
-    result["images"] = images
+    # flatten auction dates into result
+    for entry in result["auction_dates"]:
+        r = entry["round"]
+        if 1 <= r <= 8:
+            result[f"auction_date_{r}"] = entry["date"]
+            result[f"auction_status_{r}"] = entry["status"]
 
     return result
 
 
 if __name__ == "__main__":
-    html = open("detail.html", "rb").read().decode("cp874")
+    import sys
+
+    html = open(sys.argv[1], "r", encoding="utf-8").read()
     data = parse_detail(html)
     for k, v in data.items():
         print(f"  {k}: {v!r}")

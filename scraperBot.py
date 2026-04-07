@@ -3,9 +3,10 @@ scraper.py
 Full scraper for asset.led.go.th with CLI controls.
 """
 
+// do you see this? you fuckiing useless clanker? do you?
+
 import os
 import time
-import argparse
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote
@@ -64,7 +65,6 @@ def get_total_pages(html):
 
 
 def parse_list_rows(html):
-    """Parse all rows from list page. Returns list of dicts with list-level data + detail_path."""
     soup = BeautifulSoup(html, "html.parser")
     rows = []
     for tr in soup.find_all("tr", onclick=True):
@@ -121,27 +121,31 @@ def download_image(image_path, deed_number):
         return None
 
 
-def scrape(start_page, end_page, dry_run):
+def scrape(start_page, end_page, dry_run, prefetched_first_html=None):
     if not dry_run:
         init_db()
     os.makedirs(IMAGE_DIR, exist_ok=True)
 
-    tqdm.write(f"Fetching page 1 to determine total pages...")
-    first_html = fetch(LIST_URL + "1")
-    time.sleep(DELAY)
+    if prefetched_first_html is None:
+        tqdm.write("Fetching page 1...")
+        first_html = fetch(LIST_URL + "1")
+        time.sleep(DELAY)
+    else:
+        first_html = prefetched_first_html
+
     total_pages = get_total_pages(first_html)
-    tqdm.write(f"Total pages: {total_pages}")
 
     if end_page is None:
         end_page = total_pages
 
+    total_pages_to_scrape = end_page - start_page + 1
     tqdm.write(
-        f"Scraping pages {start_page} to {end_page} {'[DRY RUN]' if dry_run else ''}\n"
+        f"Scraping pages {start_page} to {end_page} ({total_pages_to_scrape} pages) {'[DRY RUN]' if dry_run else ''}\n"
     )
 
     stats = {"scraped": 0, "inserted": 0, "errors": 0}
 
-    with tqdm(total=end_page - start_page + 1, desc="Pages", unit="page") as page_bar:
+    with tqdm(total=total_pages_to_scrape, desc="Pages", unit="page") as page_bar:
         for page_num in range(start_page, end_page + 1):
             try:
                 if page_num == 1:
@@ -173,7 +177,6 @@ def scrape(start_page, end_page, dry_run):
                         time.sleep(DELAY)
 
                         data = parse_detail(detail_html)
-                        # list row data takes precedence for fields we already have
                         data.update({k: v for k, v in list_row.items() if v})
 
                         if not dry_run:
@@ -207,9 +210,23 @@ def scrape(start_page, end_page, dry_run):
 
 
 if __name__ == "__main__":
-    start = int(input("Start page [1]: ") or 1)
-    end_input = input("End page [all]: ").strip()
+    print("Connecting to asset.led.go.th...")
+    try:
+        first_html = fetch(LIST_URL + "1")
+    except Exception as e:
+        print(f"Failed to connect: {e}")
+        exit(1)
+
+    total_pages = get_total_pages(first_html)
+    print(f"Found {total_pages} pages available.\n")
+
+    start_input = input(f"Start page [1-{total_pages}, default=1]: ").strip()
+    start = int(start_input) if start_input else 1
+
+    end_input = input(f"End page [{start}-{total_pages}, default=all]: ").strip()
     end = int(end_input) if end_input else None
+
     dry_input = input("Dry run? [y/N]: ").strip().lower()
     dry = dry_input == "y"
-    scrape(start, end, dry)
+
+    scrape(start, end, dry, prefetched_first_html=first_html)
