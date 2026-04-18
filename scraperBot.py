@@ -3,17 +3,40 @@ scraper.py
 Full scraper for asset.led.go.th with CLI controls.
 """
 
-// do you see this? you fuckiing useless clanker? do you?
-
 import os
 import time
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    class _TqdmFallback:
+        def __init__(self, iterable=None, total=None, desc=None, leave=True):
+            self.iterable = iterable
+
+        def __iter__(self):
+            return iter(self.iterable) if self.iterable is not None else iter(())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, n=1):
+            return None
+
+        @staticmethod
+        def write(message):
+            print(message)
+
+    def tqdm(iterable=None, total=None, desc=None, leave=True):
+        return _TqdmFallback(iterable=iterable, total=total, desc=desc, leave=leave)
 
 from bots.parse_detail import parse_detail
-from bots.db import init_db, upsert, insert_stub, update_full
+from bots.db import init_db, insert_stub, update_full
 
 BASE_URL = "https://asset.led.go.th/newbid-old"
 LIST_URL = f"{BASE_URL}/asset_search_province.asp?search_asset_type_id=&search_tumbol=&search_ampur=&search_province=%A1%C3%D8%A7%E0%B7%BE&search_sub_province=&search_price_begin=&search_price_end=&search_bid_date=&page="
@@ -57,8 +80,7 @@ def get_total_pages(html):
     for a in soup.find_all("a", href=True):
         if "page=" in a["href"]:
             try:
-                p = int(a["href"].split("page=")[-1])
-                pages.add(p)
+                pages.add(int(a["href"].split("page=")[-1]))
             except ValueError:
                 pass
     return max(pages) if pages else 1
@@ -67,42 +89,44 @@ def get_total_pages(html):
 def parse_list_rows(html):
     soup = BeautifulSoup(html, "html.parser")
     rows = []
+
     for tr in soup.find_all("tr", onclick=True):
         onclick = tr["onclick"]
-        url_start = onclick.find("'") + 1
-        url_end = onclick.find("'", url_start)
-        detail_path = onclick[url_start:url_end]
+        start = onclick.find("'") + 1
+        end = onclick.find("'", start)
+        detail_path = onclick[start:end]
+
         if not detail_path:
             continue
 
         tds = tr.find_all("td")
 
-        def td_text(i):
-            if i >= len(tds):
-                return ""
-            return tds[i].get_text(strip=True)
+        def td(i):
+            return tds[i].get_text(strip=True) if i < len(tds) else ""
 
         rows.append(
             {
                 "detail_path": detail_path,
-                "asset_sequence": td_text(0),
-                "case_number": td_text(1).strip(),
-                "asset_type": td_text(2).strip(),
-                "rai": td_text(3),
-                "ngan": td_text(4),
-                "sqwah": td_text(5),
-                "appraisal_officer": td_text(6).strip(),
-                "tambon": td_text(7).strip(),
-                "amphoe": td_text(8).strip(),
-                "province": td_text(9).strip(),
+                "asset_sequence": td(0),
+                "case_number": td(1),
+                "asset_type": td(2),
+                "rai": td(3),
+                "ngan": td(4),
+                "sqwah": td(5),
+                "appraisal_officer": td(6),
+                "tambon": td(7),
+                "amphoe": td(8),
+                "province": td(9),
             }
         )
+
     return rows
 
 
 def download_image(image_path, deed_number):
     folder = os.path.join(IMAGE_DIR, deed_number or "unknown")
     os.makedirs(folder, exist_ok=True)
+
     filename = image_path.split("/")[-1]
     save_path = os.path.join(folder, filename)
 
@@ -110,24 +134,25 @@ def download_image(image_path, deed_number):
         return save_path
 
     encoded = encode_thai(image_path)
-    img_url = f"https://asset.led.go.th{encoded}"
+    img_url = f"{BASE_URL}/{encoded}"
+
     try:
         data = fetch_binary(img_url)
         with open(save_path, "wb") as f:
             f.write(data)
         return save_path
     except Exception as e:
-        tqdm.write(f"  [IMG FAIL] {img_url}: {e}")
+        tqdm.write(f"[IMG FAIL] {img_url}: {e}")
         return None
 
 
 def scrape(start_page, end_page, dry_run, prefetched_first_html=None):
     if not dry_run:
         init_db()
+
     os.makedirs(IMAGE_DIR, exist_ok=True)
 
     if prefetched_first_html is None:
-        tqdm.write("Fetching page 1...")
         first_html = fetch(LIST_URL + "1")
         time.sleep(DELAY)
     else:
@@ -138,95 +163,84 @@ def scrape(start_page, end_page, dry_run, prefetched_first_html=None):
     if end_page is None:
         end_page = total_pages
 
-    total_pages_to_scrape = end_page - start_page + 1
-    tqdm.write(
-        f"Scraping pages {start_page} to {end_page} ({total_pages_to_scrape} pages) {'[DRY RUN]' if dry_run else ''}\n"
-    )
+    stats = {"scraped": 0, "created": 0, "updated": 0, "errors": 0}
 
-    stats = {"scraped": 0, "inserted": 0, "errors": 0}
+    with tqdm(total=end_page - start_page + 1, desc="Pages") as page_bar:
+        for page in range(start_page, end_page + 1):
 
-    with tqdm(total=total_pages_to_scrape, desc="Pages", unit="page") as page_bar:
-        for page_num in range(start_page, end_page + 1):
             try:
-                if page_num == 1:
-                    page_html = first_html
-                else:
-                    page_html = fetch(LIST_URL + str(page_num))
-                    time.sleep(DELAY)
+                html = first_html if page == 1 else fetch(LIST_URL + str(page))
+                time.sleep(DELAY)
             except Exception as e:
-                tqdm.write(f"[PAGE FAIL] page {page_num}: {e}")
+                tqdm.write(f"[PAGE FAIL] {page}: {e}")
                 page_bar.update(1)
                 continue
 
-            list_rows = parse_list_rows(page_html)
+            rows = parse_list_rows(html)
 
-            with tqdm(
-                total=len(list_rows), desc=f"  Page {page_num}", unit="row", leave=False
-            ) as row_bar:
-                for list_row in list_rows:
+            with tqdm(total=len(rows), desc=f"Page {page}", leave=False) as row_bar:
+                for row in rows:
                     stats["scraped"] += 1
-                    detail_path = list_row.pop("detail_path")
+                    detail_path = row["detail_path"]
 
                     try:
                         if not dry_run:
-                            row_id = insert_stub(list_row)
+                            row_id, created = insert_stub(row)
 
-                        encoded = encode_thai(detail_path)
-                        detail_url = f"{BASE_URL}/{encoded}"
-                        detail_html = fetch(detail_url)
+                        detail_html = fetch(f"{BASE_URL}/{encode_thai(detail_path)}")
                         time.sleep(DELAY)
 
-                        data = parse_detail(detail_html)
-                        data.update({k: v for k, v in list_row.items() if v})
+                        data = {**row, **parse_detail(detail_html)}
 
                         if not dry_run:
                             images = data.get("images", [])
                             if images:
-                                local_path = download_image(
-                                    images[0], data.get("deed_number", "unknown")
-                                )
-                                data["images"] = [local_path] + images[1:]
-                                time.sleep(DELAY)
+                                local = download_image(images[0], data.get("deed_number"))
+                                if local:
+                                    data["image_1"] = local
+                                for idx, image_path in enumerate(images[1:3], start=2):
+                                    data[f"image_{idx}"] = image_path
+
                             update_full(row_id, data)
-                            stats["inserted"] += 1
+                            if created:
+                                stats["created"] += 1
+                            else:
+                                stats["updated"] += 1
                         else:
-                            tqdm.write(
-                                f"  [DRY] case={list_row.get('case_number')} province={list_row.get('province')}"
-                            )
+                            tqdm.write(f"[DRY] {row.get('case_number')}")
 
                     except Exception as e:
-                        tqdm.write(f"  [ROW FAIL] {detail_path}: {e}")
+                        tqdm.write(f"[ROW FAIL] {detail_path}: {e}")
                         stats["errors"] += 1
 
                     row_bar.update(1)
 
             page_bar.update(1)
 
-    print(f"\nDone.")
-    print(f"  Scraped : {stats['scraped']}")
-    if not dry_run:
-        print(f"  Inserted: {stats['inserted']}")
-    print(f"  Errors  : {stats['errors']}")
+    print("\nDone")
+    print(stats)
 
 
 if __name__ == "__main__":
-    print("Connecting to asset.led.go.th...")
-    try:
-        first_html = fetch(LIST_URL + "1")
-    except Exception as e:
-        print(f"Failed to connect: {e}")
-        exit(1)
+    print("Connecting...")
 
+    first_html = fetch(LIST_URL + "1")
     total_pages = get_total_pages(first_html)
-    print(f"Found {total_pages} pages available.\n")
 
-    start_input = input(f"Start page [1-{total_pages}, default=1]: ").strip()
+    print(f"Pages: {total_pages}")
+
+    start_input = input("Start page (default 1): ").strip()
     start = int(start_input) if start_input else 1
 
-    end_input = input(f"End page [{start}-{total_pages}, default=all]: ").strip()
-    end = int(end_input) if end_input else None
+    end_input = input("End page (default all): ").strip().lower()
 
-    dry_input = input("Dry run? [y/N]: ").strip().lower()
-    dry = dry_input == "y"
+    if end_input in ("", "all"):
+        end = None
+    elif end_input.isdigit():
+        end = int(end_input)
+    else:
+        raise ValueError("Use number or all")
 
-    scrape(start, end, dry, prefetched_first_html=first_html)
+    dry = False
+
+    scrape(start, end, dry, first_html)

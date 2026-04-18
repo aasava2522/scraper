@@ -26,6 +26,11 @@ FIELD_MAP = [
 DATE_LABEL = "นัดที่"
 
 
+def extract_window_open_path(text):
+    match = re.search(r"window\.open\(\s*'([^']+)'", text or "")
+    return match.group(1).strip() if match else None
+
+
 def parse_land_size(td):
     children = list(td.children)
     if not children:
@@ -123,28 +128,24 @@ def parse_detail(html):
     # office and phone — in same td, split by โทร
     for td in soup.find_all("td"):
         text = td.get_text(" ", strip=True)
-        if "(สำนักงานบังคับคดี" in text or "สำนักงานบังคับคดีจังหวัด" in text:
-            reds = td.find_all("font", color="#FF0000")
-            if len(reds) >= 1:
-                result["office"] = reds[0].get_text(strip=True)
-            if len(reds) >= 2:
-                result["phone"] = reds[1].get_text(strip=True)
+        if text.startswith("(สำนักงานบังคับคดี"):
+            cleaned = re.sub(
+                r"^\(สำนักงานบังคับคดีจังหวัด/กอง/สำนักงานบังคับคดี\)\s*",
+                "",
+                text,
+            ).strip()
+            office, _, phone = cleaned.partition("โทร")
+            if office.strip():
+                result["office"] = office.strip()
+            if phone.strip():
+                result["phone"] = phone.strip()
             break
 
-    # venue — สถานที่จำหน่าย, text after <strong> tag
+    # venue — prefer the dedicated td instead of the whole container block
     for td in soup.find_all("td"):
-        strong = td.find("strong")
-        if strong and "สถานที่จำหน่าย" in strong.get_text():
-            # get all text after the strong tag
-            parts = []
-            for node in td.children:
-                if node == strong:
-                    continue
-                if hasattr(node, "get_text"):
-                    parts.append(node.get_text(" ", strip=True))
-                else:
-                    parts.append(str(node).strip())
-            venue = " ".join(p for p in parts if p).strip()
+        text = td.get_text(" ", strip=True)
+        if text.startswith("สถานที่จำหน่าย"):
+            venue = text.replace("สถานที่จำหน่าย", "", 1).strip()
             if venue:
                 result["venue"] = venue
             break
@@ -153,10 +154,20 @@ def parse_detail(html):
     for td in soup.find_all("td"):
         text = td.get_text(" ", strip=True)
         if "เจ้าของสำนวน" in text:
-            red = td.find("font", color="#FF0000")
-            if red:
-                result["case_officer"] = red.get_text(strip=True)
+            result["case_officer"] = text.split("เจ้าของสำนวน", 1)[-1].strip()
             break
+
+    image_paths = []
+
+    for a in soup.find_all("a", onclick=True):
+        path = extract_window_open_path(a.get("onclick"))
+        if path and path not in image_paths:
+            image_paths.append(path)
+
+    for img in soup.find_all("img", src=True):
+        path = img.get("src", "").strip()
+        if path.startswith("/") and path not in image_paths:
+            image_paths.append(path)
 
     # map FIELD_MAP
     for thai_label, eng_key in FIELD_MAP:
@@ -185,6 +196,10 @@ def parse_detail(html):
         if 1 <= r <= 8:
             result[f"auction_date_{r}"] = entry["date"]
             result[f"auction_status_{r}"] = entry["status"]
+
+    result["images"] = image_paths[:3]
+    for idx, image_path in enumerate(result["images"], start=1):
+        result[f"image_{idx}"] = image_path
 
     return result
 
