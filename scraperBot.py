@@ -8,6 +8,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote
+from requests import RequestException
 
 try:
     from tqdm import tqdm
@@ -42,30 +43,46 @@ BASE_URL = "https://asset.led.go.th/newbid-old"
 LIST_URL = f"{BASE_URL}/asset_search_province.asp?search_asset_type_id=&search_tumbol=&search_ampur=&search_province=%A1%C3%D8%A7%E0%B7%BE&search_sub_province=&search_price_begin=&search_price_end=&search_bid_date=&page="
 IMAGE_DIR = "/mnt/0CDCB75BDCB73E30/scraperBots/images"
 DELAY = 1.0
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = 20
+MAX_RETRIES = 5
+
+session = requests.Session()
+session.headers.update(
+    {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+)
 
 
-def fetch(url, retries=3):
+def fetch(url, retries=MAX_RETRIES):
     for attempt in range(retries):
         try:
-            r = requests.get(url, timeout=20)
+            r = session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
             r.raise_for_status()
             return r.content.decode("cp874")
-        except Exception as e:
+        except RequestException as e:
             if attempt < retries - 1:
-                time.sleep(DELAY * 2)
+                wait = DELAY * (2**attempt)
+                tqdm.write(
+                    f"[RETRY {attempt + 1}/{retries}] {url} failed ({e.__class__.__name__}), sleeping {wait:.1f}s"
+                )
+                time.sleep(wait)
             else:
                 raise e
 
 
-def fetch_binary(url, retries=3):
+def fetch_binary(url, retries=MAX_RETRIES):
     for attempt in range(retries):
         try:
-            r = requests.get(url, timeout=20)
+            r = session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
             r.raise_for_status()
             return r.content
-        except Exception as e:
+        except RequestException as e:
             if attempt < retries - 1:
-                time.sleep(DELAY * 2)
+                wait = DELAY * (2**attempt)
+                tqdm.write(
+                    f"[RETRY {attempt + 1}/{retries}] {url} failed ({e.__class__.__name__}), sleeping {wait:.1f}s"
+                )
+                time.sleep(wait)
             else:
                 raise e
 
@@ -165,12 +182,19 @@ def scrape(start_page, end_page, dry_run, prefetched_first_html=None):
 
     stats = {"scraped": 0, "created": 0, "updated": 0, "errors": 0}
 
+    aborted = False
     with tqdm(total=end_page - start_page + 1, desc="Pages") as page_bar:
         for page in range(start_page, end_page + 1):
+            if aborted:
+                break
 
             try:
                 html = first_html if page == 1 else fetch(LIST_URL + str(page))
                 time.sleep(DELAY)
+            except KeyboardInterrupt:
+                tqdm.write("\n[INTERRUPTED] Stopped by user while fetching page.")
+                aborted = True
+                continue
             except Exception as e:
                 tqdm.write(f"[PAGE FAIL] {page}: {e}")
                 page_bar.update(1)
@@ -180,6 +204,8 @@ def scrape(start_page, end_page, dry_run, prefetched_first_html=None):
 
             with tqdm(total=len(rows), desc=f"Page {page}", leave=False) as row_bar:
                 for row in rows:
+                    if aborted:
+                        break
                     stats["scraped"] += 1
                     detail_path = row["detail_path"]
 
@@ -209,6 +235,10 @@ def scrape(start_page, end_page, dry_run, prefetched_first_html=None):
                         else:
                             tqdm.write(f"[DRY] {row.get('case_number')}")
 
+                    except KeyboardInterrupt:
+                        tqdm.write("\n[INTERRUPTED] Stopped by user while fetching row.")
+                        aborted = True
+                        break
                     except Exception as e:
                         tqdm.write(f"[ROW FAIL] {detail_path}: {e}")
                         stats["errors"] += 1
@@ -217,7 +247,10 @@ def scrape(start_page, end_page, dry_run, prefetched_first_html=None):
 
             page_bar.update(1)
 
-    print("\nDone")
+    if aborted:
+        print("\nStopped early (user interrupt)")
+    else:
+        print("\nDone")
     print(stats)
 
 
